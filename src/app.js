@@ -3,3 +3,5 @@
 export const VERSION = '1.0.0';
 export const greet = (who) => `hello, ${who}`;
 export const add = (a, b) => a + b;
+
+export const sub = (a, b) => a - b;
