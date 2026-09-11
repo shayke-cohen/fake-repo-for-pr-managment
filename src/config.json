@@ -1,0 +1,5 @@
+{
+  "name": "fixture-app",
+  "valid": true,
+  "features": ["board", "reap", "dispatch"]
+}

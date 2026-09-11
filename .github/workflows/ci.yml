@@ -1,0 +1,20 @@
+# Passes iff src/config.json has "valid": true. That makes a red lane something
+# a fixture can ASK for rather than wait for.
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: config is valid
+        run: |
+          set -eu
+          valid=$(node -e "process.stdout.write(String(require('./src/config.json').valid))")
+          echo "valid=$valid"
+          test "$valid" = "true" || { echo "::error::src/config.json is marked invalid"; exit 1; }
+      - name: module loads
+        run: node --input-type=module -e "import('./src/app.js').then(m => console.log('VERSION', m.VERSION))"
