@@ -2,3 +2,5 @@
 // the same file, git reports a conflict and the fixture stops describing the
 // state it claims to describe.
 export const clamp = (n, lo, hi) => Math.min(Math.max(n, lo), hi);
+
+export const lerp = (a, b, t) => a + (b - a) * t;
