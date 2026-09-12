@@ -1,6 +1,6 @@
 {
   "name": "fixture-app",
-  "valid": false,
+  "valid": true,
   "features": [
     "board",
     "reap",
