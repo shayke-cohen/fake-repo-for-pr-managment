@@ -97,6 +97,33 @@ jobs:
           gh issue comment "${{ github.event.issue.number }}" \
             --repo "${{ github.repository }}" --body-file /tmp/help.md
 
+      # HANDLERS COME FROM THE DEFAULT BRANCH, NEVER FROM THE PULL REQUEST.
+      #
+      # This is a security boundary, not tidiness. The next step checks out the
+      # PR's head branch so a handler can modify and push it -- and that branch
+      # is authored by whoever opened the pull request. Resolving the handler
+      # from the working tree after that checkout would execute an
+      # attacker-supplied script with `contents: write`: anyone able to open a
+      # PR could add `.github/dispatch-handlers/repair.sh` and have this
+      # workflow run it. So the handlers are copied out of the trusted
+      # default-branch checkout FIRST, and run from there.
+      #
+      # Found because the handler silently did not run: it lives on `main`, and
+      # the PR branch predated it.
+      - name: Stash the trusted handlers
+        id: handlers
+        if: steps.parse.outputs.fire == 'true' && steps.parse.outputs.command != 'help'
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/dispatch-handlers"
+          mkdir -p "$dir"
+          if [ -d .github/dispatch-handlers ]; then
+            cp -R .github/dispatch-handlers/. "$dir/"
+            chmod +x "$dir"/*.sh 2>/dev/null || true
+          fi
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          echo "handlers available: $(ls -1 "$dir" 2>/dev/null | tr '\n' ' ')"
+
       # Check out the PR's head branch, so a handler can change it and push.
       - name: Check out the pull request branch
         if: steps.parse.outputs.fire == 'true' && steps.parse.outputs.command != 'help'
@@ -125,7 +152,7 @@ jobs:
           # to do is a script the repo owns. Keeping them apart means a repo can
           # swap a deterministic fixer for an agent, or the reverse, without
           # touching a line of the gate.
-          handler=".github/dispatch-handlers/${COMMAND}.sh"
+          handler="${{ steps.handlers.outputs.dir }}/${COMMAND}.sh"
           if [ ! -x "$handler" ]; then
             echo "::notice::no handler at $handler — nothing to run for '$COMMAND'"
             echo "detail=no handler for \`$COMMAND\`" >> "$GITHUB_OUTPUT"
