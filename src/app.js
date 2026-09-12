@@ -3,3 +3,5 @@
 export const VERSION = '1.1.0-from-main';
 export const greet = (who) => `hello, ${who}`;
 export const add = (a, b) => a + b;
+
+export const mul = (a, b) => a * b;
