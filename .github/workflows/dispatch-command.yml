@@ -21,7 +21,9 @@ on:
     types: [created]
 
 permissions:
-  contents: read
+  # `contents: write` is needed only because a handler may push a fix to the
+  # PR branch. Drop it back to `read` in a repo whose handlers only comment.
+  contents: write
   issues: write
   pull-requests: write
 
@@ -95,21 +97,48 @@ jobs:
           gh issue comment "${{ github.event.issue.number }}" \
             --repo "${{ github.repository }}" --body-file /tmp/help.md
 
+      # Check out the PR's head branch, so a handler can change it and push.
+      - name: Check out the pull request branch
+        if: steps.parse.outputs.fire == 'true' && steps.parse.outputs.command != 'help'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh pr checkout "${{ github.event.issue.number }}" --repo "${{ github.repository }}"
+          git config user.name "dispatch-board[bot]"
+          git config user.email "dispatch-board@users.noreply.github.com"
+
       - name: Do the work
         id: work
         if: steps.parse.outputs.fire == 'true' && steps.parse.outputs.command != 'help'
         env:
+          GH_TOKEN: ${{ github.token }}
           COMMAND: ${{ steps.parse.outputs.command }}
           INSTRUCTION: ${{ steps.parse.outputs.instruction }}
           KNOWN: ${{ steps.parse.outputs.known }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          # Replace this step with the real agent trigger. It is deliberately
-          # separate from parsing so the trigger can be swapped per repo without
-          # touching anything that decides WHETHER to fire.
-          echo "command:     $COMMAND"
-          echo "known verb:  $KNOWN"
-          echo "instruction: $INSTRUCTION"
+          # THE HANDLER IS THE REPO'S, NOT THIS WORKFLOW'S. Whatever decides
+          # WHETHER to fire is tested in core/command.mjs; whatever decides WHAT
+          # to do is a script the repo owns. Keeping them apart means a repo can
+          # swap a deterministic fixer for an agent, or the reverse, without
+          # touching a line of the gate.
+          handler=".github/dispatch-handlers/${COMMAND}.sh"
+          if [ ! -x "$handler" ]; then
+            echo "::notice::no handler at $handler — nothing to run for '$COMMAND'"
+            echo "detail=no handler for \`$COMMAND\`" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "running $handler"
+          out=$("$handler" 2>&1 | tail -20)
+          printf '%s\n' "$out"
+          {
+            echo 'detail<<HANDLER_EOF'
+            printf '%s\n' "$out"
+            echo 'HANDLER_EOF'
+          } >> "$GITHUB_OUTPUT"
 
       - name: Acknowledge — dispatched
         if: steps.parse.outputs.fire == 'true' && steps.parse.outputs.command != 'help'
@@ -132,6 +161,10 @@ jobs:
           $icon **\`#dispatch ${{ steps.parse.outputs.command }}\`** — $status
 
           > ${{ steps.parse.outputs.instruction }}
+
+          ```
+          ${{ steps.work.outputs.detail }}
+          ```
 
           [run log]($RUN_URL)
 
