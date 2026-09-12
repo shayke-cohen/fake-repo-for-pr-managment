@@ -1,0 +1,141 @@
+# Reference `#dispatch` command workflow.
+#
+# Copy into a repo as `.github/workflows/dispatch-command.yml`. It is a THIN
+# TRIGGER on purpose: every decision it makes comes from `core/command.mjs`,
+# which is unit-tested. A regex buried in a workflow `if:` cannot be tested and
+# fails silently forever -- that is the failure this shape avoids.
+#
+# WHAT IT GUARANTEES
+#   * A command must OPEN ITS OWN LINE. Quoting one while discussing it
+#     ("I think #dispatch repair would help") does not fire it.
+#   * Code fences, `>` quotes and HTML comments are stripped before parsing, so
+#     documentation and our own markers can never be read back as instructions.
+#   * Authorization comes from `author_association`, never from the body. The
+#     body is written by whoever commented and can claim anything.
+#   * Acknowledgement is two-stage: 👀 means parsed, 🚀 means dispatched. They
+#     answer different questions and a single reaction conflates them.
+name: dispatch command
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  # KEYED ON THE ISSUE, never on github.ref. For `issue_comment`, `ref` is the
+  # default branch for every comment on every issue -- so a ref-keyed group
+  # collapses the whole repo into one lane and each new comment cancels the
+  # previous one's run.
+  group: dispatch-command-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    # Cheap pre-filter only. The authoritative parse happens in Node below,
+    # because `contains()` cannot express "at the start of a line".
+    if: contains(github.event.comment.body, '#dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Parse the command
+        id: parse
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          ASSOCIATION: ${{ github.event.comment.author_association }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'EOF' >> "$GITHUB_OUTPUT"
+          import { parseCommand, mayDispatch, COMMANDS } from './core/command.mjs';
+          const body = process.env.COMMENT_BODY ?? '';
+          const cmd = parseCommand(body);
+          const allowed = mayDispatch(process.env.ASSOCIATION);
+          const out = (k, v) => `${k}=${v}`;
+          const lines = [];
+          if (!cmd) {
+            lines.push(out('fire', 'false'), out('reason', 'no command on its own line'));
+          } else if (!allowed) {
+            lines.push(out('fire', 'false'),
+              out('reason', `author_association ${process.env.ASSOCIATION} may not dispatch`));
+          } else {
+            lines.push(out('fire', 'true'), out('command', cmd.command || '(bare)'),
+              out('known', String(cmd.command in COMMANDS)));
+            // Multi-line values need a heredoc delimiter in GITHUB_OUTPUT.
+            lines.push('instruction<<DISPATCH_EOF', cmd.instruction, 'DISPATCH_EOF');
+          }
+          console.log(lines.join('\n'));
+          EOF
+
+      - name: Acknowledge — parsed
+        if: steps.parse.outputs.fire == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -X POST "repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" \
+            -f content=eyes --silent
+
+      - name: Answer `help` without dispatching anything
+        if: steps.parse.outputs.fire == 'true' && steps.parse.outputs.command == 'help'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node --input-type=module -e "
+            import('./core/command.mjs').then(m => console.log(m.helpText()))
+          " > /tmp/help.md
+          gh issue comment "${{ github.event.issue.number }}" \
+            --repo "${{ github.repository }}" --body-file /tmp/help.md
+
+      - name: Do the work
+        id: work
+        if: steps.parse.outputs.fire == 'true' && steps.parse.outputs.command != 'help'
+        env:
+          COMMAND: ${{ steps.parse.outputs.command }}
+          INSTRUCTION: ${{ steps.parse.outputs.instruction }}
+          KNOWN: ${{ steps.parse.outputs.known }}
+        run: |
+          set -euo pipefail
+          # Replace this step with the real agent trigger. It is deliberately
+          # separate from parsing so the trigger can be swapped per repo without
+          # touching anything that decides WHETHER to fire.
+          echo "command:     $COMMAND"
+          echo "known verb:  $KNOWN"
+          echo "instruction: $INSTRUCTION"
+
+      - name: Acknowledge — dispatched
+        if: steps.parse.outputs.fire == 'true' && steps.parse.outputs.command != 'help'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -X POST "repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" \
+            -f content=rocket --silent
+
+      - name: Report back
+        if: always() && steps.parse.outputs.fire == 'true' && steps.parse.outputs.command != 'help'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          status="${{ steps.work.outcome }}"
+          icon=$([ "$status" = "success" ] && echo "✅" || echo "❌")
+          cat > /tmp/reply.md <<EOF
+          $icon **\`#dispatch ${{ steps.parse.outputs.command }}\`** — $status
+
+          > ${{ steps.parse.outputs.instruction }}
+
+          [run log]($RUN_URL)
+
+          <!-- dispatch-board ack ${{ github.event.comment.id }} -->
+          EOF
+          gh issue comment "${{ github.event.issue.number }}" \
+            --repo "${{ github.repository }}" --body-file /tmp/reply.md
